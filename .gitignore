@@ -18,3 +18,5 @@ cli/target
 .cursor/rules/manifest.json
 .cursor/rules/security-global/*
 .cursor/rules/security-lang/*
+
+sdk/examples/assets
