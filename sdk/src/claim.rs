@@ -1291,6 +1291,33 @@ impl Claim {
         // Grab assertion data object.
         let d = assertion.decode_data();
 
+        // let data_preview = match &d {
+        //     AssertionData::Json(s) => s.clone(),
+        //     AssertionData::Cbor(bytes) => {
+        //         let mut json_buf: Vec<u8> = Vec::new();
+        //         let mut de = c2pa_cbor::Deserializer::from_slice(bytes);
+        //         let mut ser = serde_json::Serializer::pretty(&mut json_buf);
+        //         if serde_transcode::transcode(&mut de, &mut ser).is_ok() {
+        //             String::from_utf8_lossy(&json_buf).into_owned()
+        //         } else {
+        //             format!("<cbor {} bytes, decode failed>", bytes.len())
+        //         }
+        //     }
+        //     AssertionData::Binary(bytes) => {
+        //         // Write binary assertions to /tmp so they can be inspected.
+        //         // The label may contain characters invalid in filenames (e.g. '/'), so sanitise it.
+        //         let safe_label = label.replace('/', "_").replace(':', "_");
+        //         let path = format!("/tmp/c2pa_assert_{safe_label}.bin");
+        //         let _ = std::fs::write(&path, bytes);
+        //         format!("<binary {} bytes — saved to {path}>", bytes.len())
+        //     }
+        //     AssertionData::Uuid(uuid, bytes) => format!("<uuid={uuid}, {} bytes>", bytes.len()),
+        // };
+        // println!(
+        //     "[calc_assertion_box_hash] label={label:?}, alg={alg:?}, salt={}, data={data_preview}",
+        //     salt.as_deref().map(hex::encode).unwrap_or_else(|| "none".to_string()),
+        // );
+
         let mut hash_bytes = Vec::with_capacity(2048);
 
         match d {
@@ -3136,6 +3163,14 @@ impl Claim {
         // verify assertion structure comparing hashes from assertion list to contents of assertion store
         for assertion in claim.assertions() {
             let (label, instance) = Claim::assertion_label_from_link(&assertion.url());
+            // println!(
+            //     "[verify_internal] assertion: url={:?}, alg={:?}, hash={}, is_relative={}, data={:?}",
+            //     assertion.url(),
+            //     assertion.alg(),
+            //     hex::encode(assertion.hash()),
+            //     assertion.is_relative_url(),
+            //     claim.get_claim_assertion(&label, instance),
+            // );
             let assertion_absolute_uri = if assertion.is_relative_url() {
                 to_absolute_uri(claim.label(), &assertion.url())
             } else {
