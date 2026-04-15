@@ -37,10 +37,10 @@ fn main() -> Result<()> {
     let image_bytes = std::fs::read(input_path)?;
     let mut source = Cursor::new(image_bytes.clone());
 
-    let settings = Settings::new()
-        .with_toml(include_str!("../tests/fixtures/test_settings.toml"))?;
+    // let settings = Settings::new()
+    //     .with_toml(include_str!("../tests/fixtures/test_settings.toml"))?;
 
-    let context = Context::new().with_settings(settings)?.into_shared();
+    // let context = Context::new().with_settings(settings)?.into_shared();
 
     let parent = Reader::from_stream(format, &mut source)?;
     let parent_manifest_label = parent
