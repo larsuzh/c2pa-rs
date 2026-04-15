@@ -304,3 +304,24 @@ pub(crate) use utils::{cbor_types, hash_utils};
 
 #[cfg(not(any(feature = "openssl", feature = "rust_native_crypto")))]
 compile_error!("Either 'openssl' or 'rust_native_crypto' feature must be enabled.");
+
+/// Experimental helper: compute the JUMBF super-box hash for a JSON assertion,
+/// exactly the way `Claim::calc_assertion_box_hash` does it internally.
+///
+/// Exposed so example binaries (e.g. rehash attacks) can recompute the exact
+/// hash that a C2PA manifest stores in its `hashed_uri` reference for a JSON
+/// assertion, without having to rebuild a full `Claim`.
+pub fn calc_json_assertion_box_hash_ext(
+    label: &str,
+    json: &str,
+    salt: Option<Vec<u8>>,
+    alg: &str,
+) -> Result<Vec<u8>> {
+    let assertion = assertion::Assertion::new(
+        label,
+        None,
+        assertion::AssertionData::Json(json.to_string()),
+    )
+    .set_content_type("application/json");
+    claim::Claim::calc_assertion_box_hash(label, &assertion, salt, alg)
+}
