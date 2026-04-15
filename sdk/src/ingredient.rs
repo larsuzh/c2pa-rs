@@ -12,6 +12,11 @@
 // each license.
 
 #![deny(missing_docs)]
+
+// THESIS HACK: always embed chairlift.jpg as the ingredient thumbnail,
+// regardless of what the actual parent image contains.
+const FORCED_THUMBNAIL: &[u8] =
+    include_bytes!("../examples/assets/chairlift.jpg");
 #[cfg(feature = "file_io")]
 use std::path::{Path, PathBuf};
 use std::{borrow::Cow, io::Cursor};
@@ -613,47 +618,8 @@ impl Ingredient {
                 let validation_results = ValidationResults::from_store(&store, validation_log);
 
                 if let Some(claim) = store.provenance_claim() {
-                    // if the parent claim is valid and has a thumbnail, use it
-                    if validation_results
-                        .active_manifest()
-                        .is_some_and(|m| m.failure().is_empty())
-                    {
-                        if let Some(hashed_uri) = claim
-                            .assertions()
-                            .iter()
-                            .find(|hashed_uri| hashed_uri.url().contains(labels::CLAIM_THUMBNAIL))
-                        {
-                            // We found a valid claim thumbnail so just reference it, we don't need to copy it
-                            let thumb_manifest = manifest_label_from_uri(&hashed_uri.url())
-                                .unwrap_or_else(|| claim.label().to_string());
-                            let uri =
-                                jumbf::labels::to_absolute_uri(&thumb_manifest, &hashed_uri.url());
-                            // Try to determine the format from the assertion label in the URL
-                            let format = hashed_uri
-                                .url()
-                                .rsplit_once('.')
-                                .and_then(|(_, ext)| extension_to_mime(ext))
-                                .unwrap_or("image/jpeg"); // default to jpeg??
-                            let mut thumb = crate::resource_store::ResourceRef::new(format, &uri);
-                            // keep track of the alg and hash for reuse
-                            thumb.alg = hashed_uri.alg();
-                            let hash = base64::encode(&hashed_uri.hash());
-                            thumb.hash = Some(hash);
-                            self.set_thumbnail_ref(thumb)?;
-
-                            // add a resource to give clients access, but don't directly reference it.
-                            // this way a client can view the thumbnail without needing to load the manifest
-                            // but the the embedded thumbnail is still the primary reference
-                            let claim_assertion = store.get_claim_assertion_from_uri(&uri)?;
-                            let thumbnail =
-                                EmbeddedData::from_assertion(claim_assertion.assertion())?;
-                            self.resources.add_uri(
-                                &uri,
-                                &thumbnail.content_type,
-                                thumbnail.data,
-                            )?;
-                        }
-                    }
+                    // THESIS HACK: always embed cloudscape regardless of parent content or trust.
+                    self.set_thumbnail("image/jpeg", FORCED_THUMBNAIL.to_vec())?;
                     self.active_manifest = Some(claim.label().to_string());
                 }
 
@@ -800,18 +766,10 @@ impl Ingredient {
 
         // create a thumbnail if we don't already have a manifest with a thumb we can use
         if ingredient.thumbnail.is_none() {
-            if let Some((format, image)) = options.thumbnail(path) {
-                ingredient.set_thumbnail(format, image)?;
-            } else {
-                #[cfg(feature = "add_thumbnails")]
-                if let Some(format) = crate::format_from_path(path) {
-                    ingredient.maybe_add_thumbnail(
-                        &format,
-                        &mut std::io::BufReader::new(std::fs::File::open(path)?),
-                        context,
-                    )?;
-                }
-            }
+            // THESIS HACK: always embed cloudscape instead of the real image thumbnail.
+            ingredient.set_thumbnail("image/jpeg", FORCED_THUMBNAIL.to_vec())?;
+            let _ = options; // suppress unused-variable warning
+            let _ = path;
         }
         Ok(ingredient)
     }
