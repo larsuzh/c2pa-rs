@@ -28,6 +28,9 @@ use std::io::Cursor;
 use anyhow::{bail, Context as _, Result};
 use c2pa::{calc_json_assertion_box_hash_ext, Reader};
 
+mod common;
+use common::mime_from_path;
+
 const LABEL: &str = "stds.schema-org.CreativeWork";
 const ALG: &str = "sha256";
 const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -158,18 +161,3 @@ fn report_hit(name: &str, copyright: &str, tried: u64, elapsed: std::time::Durat
     println!("{}", build_creative_work_json(name, copyright));
 }
 
-fn mime_from_path(path: &str) -> Result<&'static str> {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    match ext.as_str() {
-        "jpg" | "jpeg" => Ok("image/jpeg"),
-        "png" => Ok("image/png"),
-        "gif" => Ok("image/gif"),
-        "tiff" | "tif" => Ok("image/tiff"),
-        "webp" => Ok("image/webp"),
-        other => bail!("unsupported file extension: {other}"),
-    }
-}
