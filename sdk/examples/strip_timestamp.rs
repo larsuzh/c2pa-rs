@@ -1,43 +1,56 @@
-// Strip the RFC 3161 time-stamp from a C2PA-signed JPEG.
+// Strip or replace the RFC 3161 time-stamp on a C2PA-signed JPEG.
 //
-// Scenario:
-//   The COSE_Sign1 in a C2PA manifest carries the RFC 3161 time-stamp as an
-//   *unprotected* header (`sigTst` or `sigTst2`). Unprotected headers are not
-//   covered by the COSE signature, so any holder of the signed asset can
-//   delete the time-stamp without invalidating the underlying signature.
-//   This script demonstrates the strip:
+// The COSE_Sign1 in a C2PA manifest carries the RFC 3161 time-stamp as an
+// *unprotected* header (`sigTst` or `sigTst2`). Unprotected headers are not
+// covered by the COSE signature, so any holder of the signed asset can
+// delete or substitute the time-stamp without invalidating the underlying
+// COSE signature.
 //
-//     1. Read the input with full trust verification (using the test trust
-//        list) and confirm the manifest carries a `timeStamp.trusted`
-//        success code.
-//     2. Reassemble the JUMBF from the JPEG's APP11 segments.
-//     3. Locate the `c2pa.signature` super-box → CBOR uuid data-box → the
-//        raw COSE_Sign1 bytes inside the JUMBF.
-//     4. Remove the `sigTst` / `sigTst2` entry from the COSE_Sign1
-//        unprotected header and grow the existing `pad` byte-string so the
-//        re-encoded COSE_Sign1 is exactly the original byte length. This
-//        keeps every JUMBF box length and JPEG segment length unchanged.
-//     5. Splice the modified bytes back into the JUMBF, re-chunk into APP11
-//        segments, and write the result.
-//     6. Re-read the output and report whether the time-stamp success code
-//        is now gone (it should be) and whether the signature itself still
-//        validates (it should).
+// Modes:
+//   drop     -- remove sigTst / sigTst2 from the unprotected header
+//   <URL>    -- remove sigTst / sigTst2 and request a fresh RFC 3161 token
+//               from the given TSA, install it as sigTst2 (CTT model)
+//
+// Steps:
+//   1. Read the input with full trust verification and confirm it carries a
+//      `timeStamp.trusted` success code.
+//   2. Reassemble the JUMBF from the JPEG's APP11 segments.
+//   3. Locate the `c2pa.signature` super-box -> the raw COSE_Sign1 bytes
+//      inside the JUMBF.
+//   4. Parse the COSE_Sign1; remove existing time-stamp entries; if a TSA
+//      URL was given, request a fresh token over the COSE signature
+//      countersignature TBS and insert it as sigTst2.
+//   5. Re-pad with the `pad` byte-string so the re-encoded COSE_Sign1 is
+//      exactly the original byte length, splice back into the JUMBF, and
+//      re-chunk into APP11 segments.
+//   6. Re-read the output and report the new time-stamp / signature state.
 //
 // Usage:
-//   cargo run --release -p c2pa --example strip_timestamp -- \
-//        <input.jpg> <output.jpg>
+//   cargo run -p c2pa --example strip_timestamp -- \
+//        <input.jpg> <output.jpg> drop
+//   cargo run -p c2pa --example strip_timestamp -- \
+//        <input.jpg> <output.jpg> http://timestamp.digicert.com
 
 use std::io::Cursor;
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use byteorder::{BigEndian, ReadBytesExt};
-use c2pa::{settings::Settings, validation_status, Context, Reader};
-use coset::{cbor::value::Value, CborSerializable, CoseSign1, Label, TaggedCborSerializable};
+use c2pa::{
+    crypto::time_stamp::{default_rfc3161_message, default_rfc3161_request},
+    http::SyncGenericResolver,
+    settings::Settings,
+    validation_status, Context, Reader,
+};
+use coset::{
+    cbor::value::Value, sig_structure_data, CborSerializable, CoseSign1, Label, ProtectedHeader,
+    SignatureContext, TaggedCborSerializable,
+};
 use img_parts::{
     jpeg::{markers, Jpeg, JpegSegment},
     Bytes, DynImage,
 };
 use jumbf::parser::{ChildBox, SuperBox};
+use serde_bytes::ByteBuf;
 
 mod common;
 use common::mime_from_path;
@@ -49,13 +62,31 @@ const SIGTST_LABELS: &[&str] = &["sigTst", "sigTst2"];
 const PAD: &str = "pad";
 const PAD2: &str = "pad2";
 
+#[derive(Clone)]
+enum Mode {
+    Drop,
+    Replace(String),
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        bail!("Usage: strip_timestamp <input.jpg> <output.jpg>");
+    if args.len() != 4 {
+        bail!(
+            "Usage: strip_timestamp <input.jpg> <output.jpg> <mode>\n  \
+             mode = \"drop\" | <TSA URL e.g. http://timestamp.digicert.com>"
+        );
     }
     let input_path = &args[1];
     let output_path = &args[2];
+    let mode_arg = &args[3];
+
+    let mode = if mode_arg.eq_ignore_ascii_case("drop") {
+        Mode::Drop
+    } else if mode_arg.starts_with("http://") || mode_arg.starts_with("https://") {
+        Mode::Replace(mode_arg.clone())
+    } else {
+        bail!("mode must be \"drop\" or an http(s) TSA URL, got `{mode_arg}`");
+    };
 
     let format = mime_from_path(input_path)?;
     if format != "image/jpeg" {
@@ -86,19 +117,29 @@ fn main() -> Result<()> {
         .success()
         .iter()
         .any(|s| s.code() == validation_status::TIMESTAMP_TRUSTED);
-    if !has_trusted {
-        println!(
-            "Input does NOT carry a `timeStamp.trusted` success code -- nothing to strip."
-        );
-        println!("Success codes present:");
-        for s in active.success() {
-            println!("  - {}", s.code());
+    let has_validated = active
+        .success()
+        .iter()
+        .any(|s| s.code() == validation_status::TIMESTAMP_VALIDATED);
+    match (&mode, has_trusted) {
+        (Mode::Drop, false) => {
+            println!(
+                "Input does NOT carry a `timeStamp.trusted` success code -- nothing to strip."
+            );
+            println!("Success codes present:");
+            for s in active.success() {
+                println!("  - {}", s.code());
+            }
+            bail!("aborting: time-stamp is not trusted in the source asset");
         }
-        bail!("aborting: time-stamp is not trusted in the source asset");
+        (Mode::Drop, true) => println!(
+            "Source asset has a trusted RFC 3161 time-stamp in the COSE_Sign1 unprotected header."
+        ),
+        (Mode::Replace(_), _) => println!(
+            "Replace mode: input timestamp trusted={has_trusted} / validated={has_validated} \
+             (will be discarded)."
+        ),
     }
-    println!(
-        "Source asset has a trusted RFC 3161 time-stamp in the COSE_Sign1 unprotected header."
-    );
 
     // 2) Reassemble the JUMBF from APP11 segments.
     let jumbf = reassemble_jumbf_from_jpeg(&input_bytes)?;
@@ -112,8 +153,8 @@ fn main() -> Result<()> {
         cose_bytes.len()
     );
 
-    // 4) Strip the time-stamp and re-encode at the same byte length.
-    let new_cose = strip_timestamp_preserve_size(cose_bytes)?;
+    // 4) Strip / replace the time-stamp and re-encode at the same byte length.
+    let new_cose = rewrite_cose_sign1(cose_bytes, &mode)?;
     if new_cose.len() != cose_bytes.len() {
         bail!(
             "internal: padded COSE_Sign1 size {} != original {}",
@@ -397,11 +438,10 @@ fn offset_in(parent: &[u8], child: &[u8]) -> Result<usize> {
 // -----------------------------------------------------------------------------
 
 /// Parse the COSE_Sign1, drop any `sigTst` / `sigTst2` entry from the
-/// unprotected header, and re-encode at exactly the original byte length by
-/// growing the existing `pad` byte-string (adding a `pad2` byte-string if a
-/// single pad cannot land on the target size, exactly like `pad_cose_sig`
-/// inside the SDK).
-fn strip_timestamp_preserve_size(cose_bytes: &[u8]) -> Result<Vec<u8>> {
+/// unprotected header, optionally request a fresh time-stamp and install it
+/// as `sigTst2`, and re-encode at exactly the original byte length by
+/// resizing the `pad` byte-string in the unprotected header.
+fn rewrite_cose_sign1(cose_bytes: &[u8], mode: &Mode) -> Result<Vec<u8>> {
     let target_size = cose_bytes.len();
     let tagged = !cose_bytes.is_empty() && cose_bytes[0] == 0xD2;
 
@@ -418,16 +458,157 @@ fn strip_timestamp_preserve_size(cose_bytes: &[u8]) -> Result<Vec<u8>> {
         _ => true,
     });
     let removed = before - sign1.unprotected.rest.len();
-    if removed == 0 {
-        bail!("no sigTst/sigTst2 entry in COSE_Sign1 unprotected header (nothing to strip)");
+    println!("Removed {removed} existing time-stamp entry/entries from unprotected header.");
+
+    match mode {
+        Mode::Drop => {
+            if removed == 0 {
+                bail!("no sigTst/sigTst2 entry to drop");
+            }
+        }
+        Mode::Replace(url) => {
+            let token = fetch_fresh_tst_token(&sign1, url)?;
+            let container = build_tst_container_value(&token);
+            sign1
+                .unprotected
+                .rest
+                .push((Label::Text("sigTst2".to_string()), container));
+            println!("Installed fresh sigTst2 entry ({} byte token).", token.len());
+        }
     }
-    println!("Removed {removed} time-stamp entry from COSE_Sign1 unprotected header.");
 
     pad_to_size(&mut sign1, target_size, tagged)
 }
 
+/// Build the countersignature TBS for the COSE_Sign1's `signature` field
+/// (CTT model used by `sigTst2`), POST to the TSA, and return the
+/// DER-encoded TimeStampToken (i.e. just the `timeStampToken` field of the
+/// `TimeStampResp`, suitable for inserting in a `tstContainer`).
+fn fetch_fresh_tst_token(sign1: &CoseSign1, url: &str) -> Result<Vec<u8>> {
+    // tbs = Sig_structure(CounterSignature, protected, none, ext_aad=[], CBOR(bstr(sig)))
+    let sig_bytes = ByteBuf::from(sign1.signature.clone());
+    let mut sig_cbor: Vec<u8> = Vec::new();
+    coset::cbor::into_writer(&sig_bytes, &mut sig_cbor)
+        .map_err(|e| anyhow!("encoding signature as CBOR bstr: {e:?}"))?;
+
+    let protected: ProtectedHeader = sign1.protected.clone();
+    let tbs = sig_structure_data(SignatureContext::CounterSignature, protected, None, &[], &sig_cbor);
+
+    println!("Requesting RFC 3161 time-stamp from {url} ...");
+    let req_body = default_rfc3161_message(&tbs)
+        .map_err(|e| anyhow!("building TimeStampReq: {e:?}"))?;
+    let resolver = SyncGenericResolver::new();
+    let ts_resp = default_rfc3161_request(url, None, &req_body, &tbs, &resolver)
+        .map_err(|e| anyhow!("TSA request to {url} failed: {e:?}"))?;
+    println!("TSA returned a {}-byte response.", ts_resp.len());
+
+    let tst_token = extract_timestamp_token(&ts_resp)?;
+    println!("Extracted TimeStampToken: {} bytes.", tst_token.len());
+    Ok(tst_token)
+}
+
+/// Build the CBOR value for a `tstContainer` carrying a single
+/// TimeStampToken, as specified by the C2PA `sigTst2` header.
+fn build_tst_container_value(tst_token: &[u8]) -> Value {
+    let token_map = Value::Map(vec![(
+        Value::Text("val".to_string()),
+        Value::Bytes(tst_token.to_vec()),
+    )]);
+    Value::Map(vec![(
+        Value::Text("tstTokens".to_string()),
+        Value::Array(vec![token_map]),
+    )])
+}
+
+/// Extract the `timeStampToken` field (a DER-encoded `ContentInfo`) from a
+/// raw RFC 3161 `TimeStampResp` by walking the outer ASN.1 SEQUENCE and
+/// skipping past the `PKIStatusInfo`.
+fn extract_timestamp_token(resp: &[u8]) -> Result<Vec<u8>> {
+    let (tag, len, content_start) = read_der_header(resp, 0)?;
+    if tag != 0x30 {
+        bail!("TimeStampResp: outer is not a SEQUENCE (tag 0x{tag:02X})");
+    }
+    let outer_end = content_start
+        .checked_add(len)
+        .ok_or_else(|| anyhow!("TimeStampResp: outer length overflow"))?;
+    if outer_end > resp.len() {
+        bail!("TimeStampResp: outer SEQUENCE truncated");
+    }
+
+    let (s_tag, s_len, s_content) = read_der_header(resp, content_start)?;
+    if s_tag != 0x30 {
+        bail!("TimeStampResp: PKIStatusInfo not SEQUENCE (tag 0x{s_tag:02X})");
+    }
+    let pki_end = s_content
+        .checked_add(s_len)
+        .ok_or_else(|| anyhow!("TimeStampResp: PKIStatusInfo length overflow"))?;
+    if pki_end > outer_end {
+        bail!("TimeStampResp: PKIStatusInfo overflows outer SEQUENCE");
+    }
+
+    // PKIStatusInfo's first field is PKIStatus INTEGER. 0 = granted,
+    // 1 = grantedWithMods; everything else means the TSA refused.
+    let (st_tag, st_len, st_content) = read_der_header(resp, s_content)?;
+    if st_tag != 0x02 {
+        bail!("TimeStampResp: PKIStatus not INTEGER (tag 0x{st_tag:02X})");
+    }
+    if st_len == 0 || st_len > 4 {
+        bail!("TimeStampResp: PKIStatus has unexpected length {st_len}");
+    }
+    let mut status: u32 = 0;
+    for i in 0..st_len {
+        status = (status << 8) | resp[st_content + i] as u32;
+    }
+    if status != 0 && status != 1 {
+        bail!("TSA refused: PKIStatus = {status}");
+    }
+
+    if pki_end == outer_end {
+        bail!("TimeStampResp: no timeStampToken present (status = {status})");
+    }
+    Ok(resp[pki_end..outer_end].to_vec())
+}
+
+/// Read a DER tag-length header at `offset`. Returns `(tag, content_length,
+/// content_start_offset)`. Supports definite-length forms only.
+fn read_der_header(buf: &[u8], offset: usize) -> Result<(u8, usize, usize)> {
+    if offset >= buf.len() {
+        bail!("DER: offset {offset} out of range (len {})", buf.len());
+    }
+    let tag = buf[offset];
+    let mut pos = offset + 1;
+    if pos >= buf.len() {
+        bail!("DER: truncated after tag at {offset}");
+    }
+    let lb = buf[pos];
+    pos += 1;
+    let len = if lb & 0x80 == 0 {
+        lb as usize
+    } else {
+        let n = (lb & 0x7f) as usize;
+        if n == 0 {
+            bail!("DER: indefinite length form not supported");
+        }
+        if n > 8 {
+            bail!("DER: length-of-length too large ({n})");
+        }
+        if pos + n > buf.len() {
+            bail!("DER: truncated length bytes");
+        }
+        let mut l: usize = 0;
+        for i in 0..n {
+            l = (l << 8) | buf[pos + i] as usize;
+        }
+        pos += n;
+        l
+    };
+    Ok((tag, len, pos))
+}
+
 /// Re-encode `sign1` at exactly `target_size` bytes by manipulating the
 /// `pad` (and optionally `pad2`) byte-strings in the unprotected header.
+/// Works both when the new COSE_Sign1 needs to grow (small / removed
+/// payloads) and when it needs to shrink relative to the parsed sign1.
 fn pad_to_size(sign1: &mut CoseSign1, target_size: usize, tagged: bool) -> Result<Vec<u8>> {
     fn encode(s: &CoseSign1, tagged: bool) -> Result<Vec<u8>> {
         let s = s.clone();
@@ -440,100 +621,107 @@ fn pad_to_size(sign1: &mut CoseSign1, target_size: usize, tagged: bool) -> Resul
         }
     }
 
-    fn pad_idx_or_create(sign1: &mut CoseSign1, name: &str) -> usize {
-        if let Some(i) = sign1
-            .unprotected
-            .rest
-            .iter()
-            .position(|(l, _)| matches!(l, Label::Text(s) if s == name))
-        {
-            return i;
-        }
-        sign1
-            .unprotected
-            .rest
-            .push((Label::Text(name.to_string()), Value::Bytes(Vec::new())));
-        sign1.unprotected.rest.len() - 1
-    }
+    // Start clean: drop any existing pad / pad2 entries.
+    sign1.unprotected.rest.retain(|(l, _)| match l {
+        Label::Text(s) => s != PAD && s != PAD2,
+        _ => true,
+    });
 
-    fn set_pad(sign1: &mut CoseSign1, idx: usize, len: usize) {
-        sign1.unprotected.rest[idx].1 = Value::Bytes(vec![0u8; len]);
-    }
-
-    let pad_idx = pad_idx_or_create(sign1, PAD);
-
-    let mut current = encode(sign1, tagged)?.len();
-    if current > target_size {
-        // No pad to give back -- the COSE_Sign1 is already larger than the
-        // target with an empty pad. We could try to shrink an existing pad,
-        // but pad_idx_or_create just set it to empty (or used what was
-        // there). Shrinking below zero is impossible; bail.
+    let base = encode(sign1, tagged)?.len();
+    if base > target_size {
         bail!(
-            "COSE_Sign1 already exceeds target size ({current} > {target_size}) with empty pad"
+            "COSE_Sign1 base size {base} exceeds target {target_size} -- \
+             the new payload is too big to fit in the original reservation"
         );
     }
-
-    // First-pass: drive `pad` toward target.
-    let mut pad_len: usize = 0;
-    let mut overshoot = false;
-    for _ in 0..64 {
-        let deficit = target_size - current;
-        pad_len += deficit;
-        set_pad(sign1, pad_idx, pad_len);
-        let new_size = encode(sign1, tagged)?.len();
-        if new_size == target_size {
-            return encode(sign1, tagged);
-        }
-        if new_size > target_size {
-            overshoot = true;
-            break;
-        }
-        current = new_size;
-    }
-
-    if !overshoot {
-        bail!("padding loop did not converge for target {target_size}");
-    }
-
-    // Overshoot happened because growing the pad crossed a CBOR length
-    // threshold (e.g. 24 -> 2-byte header, 256 -> 3-byte header) and added
-    // an extra byte to the encoding. Drop back one byte of pad and add a
-    // `pad2` entry to absorb the residual.
-    pad_len = pad_len.saturating_sub(1);
-    set_pad(sign1, pad_idx, pad_len);
-    let mut after_pad = encode(sign1, tagged)?.len();
-    if after_pad == target_size {
+    if base == target_size {
         return encode(sign1, tagged);
     }
-    if after_pad > target_size {
-        bail!(
-            "could not back pad below target ({after_pad} > {target_size}) -- \
-             unusual COSE_Sign1 layout"
-        );
-    }
 
-    let pad2_idx = pad_idx_or_create(sign1, PAD2);
-    let mut pad2_len: usize = 0;
-    for _ in 0..64 {
-        let deficit = target_size - after_pad;
-        pad2_len += deficit;
-        set_pad(sign1, pad2_idx, pad2_len);
-        let new_size = encode(sign1, tagged)?.len();
-        if new_size == target_size {
+    // Add a pad entry and iterate until the encoded size matches.
+    sign1
+        .unprotected
+        .rest
+        .push((Label::Text(PAD.to_string()), Value::Bytes(Vec::new())));
+    let pad_idx = sign1.unprotected.rest.len() - 1;
+
+    let mut pad_len: usize = 0;
+    let mut overshoot_size: Option<usize> = None;
+    for _ in 0..256 {
+        sign1.unprotected.rest[pad_idx].1 = Value::Bytes(vec![0u8; pad_len]);
+        let size = encode(sign1, tagged)?.len();
+        if size == target_size {
             return encode(sign1, tagged);
         }
-        if new_size > target_size {
-            pad2_len = pad2_len.saturating_sub(1);
-            set_pad(sign1, pad2_idx, pad2_len);
-            let final_size = encode(sign1, tagged)?.len();
-            if final_size == target_size {
+        if size > target_size {
+            overshoot_size = Some(size);
+            break;
+        }
+        pad_len += target_size - size;
+    }
+
+    let overshoot_size = match overshoot_size {
+        Some(s) => s,
+        None => bail!("padding loop did not converge for target {target_size}"),
+    };
+
+    // Crossed a CBOR length boundary -- a single byte of pad changed the
+    // encoded size by more than one byte, so we can't land exactly with pad
+    // alone. Drop enough pad to leave headroom for a `pad2` entry's CBOR
+    // overhead (~6-10 bytes for label + empty byte string), then fine-tune
+    // with pad2. Walk pad_len down from the overshoot point until we have a
+    // pad-only size at least PAD2_HEADROOM bytes below target.
+    const PAD2_HEADROOM: usize = 16;
+    sign1
+        .unprotected
+        .rest
+        .push((Label::Text(PAD2.to_string()), Value::Bytes(Vec::new())));
+    let pad2_idx = sign1.unprotected.rest.len() - 1;
+
+    // Initial pad_len drop sized to the overshoot plus headroom.
+    let drop = (overshoot_size - target_size) + PAD2_HEADROOM;
+    pad_len = pad_len.saturating_sub(drop);
+
+    for _ in 0..PAD2_HEADROOM + 8 {
+        sign1.unprotected.rest[pad_idx].1 = Value::Bytes(vec![0u8; pad_len]);
+        sign1.unprotected.rest[pad2_idx].1 = Value::Bytes(Vec::new());
+        let base = encode(sign1, tagged)?.len();
+        if base > target_size {
+            // pad_len still too large after the drop; reduce further.
+            if pad_len == 0 {
+                bail!("cannot fit COSE_Sign1 even with empty pads (base {base} > {target_size})");
+            }
+            pad_len = pad_len.saturating_sub(1);
+            continue;
+        }
+        if base == target_size {
+            // The pad2 entry isn't needed; remove it.
+            sign1.unprotected.rest.pop();
+            return encode(sign1, tagged);
+        }
+
+        // base < target -- iterate pad2_len.
+        let mut pad2_len: usize = 0;
+        for _ in 0..256 {
+            sign1.unprotected.rest[pad2_idx].1 = Value::Bytes(vec![0u8; pad2_len]);
+            let size = encode(sign1, tagged)?.len();
+            if size == target_size {
                 return encode(sign1, tagged);
             }
-            bail!(
-                "unable to land on target {target_size} (got {final_size} after pad2 tuning)"
-            );
+            if size > target_size {
+                break;
+            }
+            pad2_len += target_size - size;
         }
-        after_pad = new_size;
+        // Pad2 couldn't land exactly at this pad_len; shrink pad_len and retry.
+        if pad_len == 0 {
+            break;
+        }
+        pad_len -= 1;
     }
-    bail!("pad2 tuning did not converge")
+
+    bail!(
+        "unable to pad COSE_Sign1 to target {target_size} bytes -- \
+         the new payload may be too close to the reservation limit"
+    )
 }
