@@ -1,26 +1,32 @@
 // Pixel-level DataHash exclusion proof-of-concept.
 //
-// Like the `oversized_exclusion` example, this demonstrates that a malicious
-// signer can place bytes outside the DataHash coverage at signing time -- but
-// here we deliberately target the JPEG's *entropy-coded scan data* (i.e. the
-// compressed pixel bitstream) rather than header padding.  After signing, we
-// overwrite those bytes; the JPEG still decodes (with visible corruption
-// where the bytes used to live), and C2PA validation still passes.
+// A malicious signer declares ONE contiguous DataHash exclusion that spans
+// from the start of the JUMBF all the way through a window inside the JPEG's
+// entropy-coded scan data:
 //
-// Two exclusions are used:
-//   * `[manifest_pos, manifest_pos + manifest_len)`  -- the embedded JUMBF
-//   * `[entropy_start + GAP, entropy_start + GAP + TAMPER_LEN)` -- the
-//     pixel-bitstream window we reserve for tampering.
+//   [manifest_pos, entropy_start + ENTROPY_GAP + TAMPER_LEN)
 //
-// Having `exclusions.len() > 1` triggers an informational validator log
-// (`assertion.dataHash.additionalExclusions`), but it is NOT a failure --
-// validation state remains Valid.
+// Everything inside that range is outside the hash.  After signing, the
+// script overwrites a 4 KB slice of the pixel bitstream with 0x00 to make
+// the un-protection visible: the JPEG still decodes (with corruption where
+// those bytes were), and C2PA validation still returns Valid.
+//
+// Because there is exactly one exclusion entry, the validator does NOT emit
+// the `assertion.dataHash.additionalExclusionsPresent` informational log --
+// the exclusion list looks "clean" to anything that only counts ranges.
+// The cost of that silence is that the single exclusion also covers every
+// JPEG segment between the JUMBF and the pixel window (typically JFIF,
+// EXIF, XMP, ICC, DQT, DHT, SOF, SOS header) plus the ENTROPY_GAP "safety"
+// bytes at the start of the scan -- all of which are now outside the hash
+// and free for an attacker to mutate.
 //
 // Usage:
 //   cargo run --release -p c2pa --example pixel_tamper_exclusion -- \
 //       <input.jpg> <output_signed.jpg> <output_tampered.jpg>
 //
-// Open both output files in any image viewer to see the visible difference.
+// Open both output files in an image viewer to see the visible difference,
+// and run `analyze_exclusion_content` on them to see exactly which JPEG
+// segments the single exclusion has left unprotected.
 
 use std::io::{Cursor, Seek, Write};
 
@@ -124,19 +130,24 @@ fn main() -> Result<()> {
         bail!("source JPEG too small for a {TAMPER_LEN}-byte tamper window");
     }
 
-    // *** Two exclusions: the manifest, and our pixel-bitstream window. ***
-    let manifest_excl = HashRange::new(manifest_pos as u64, manifest_len as u64);
-    let pixel_excl = HashRange::new(tamper_start as u64, TAMPER_LEN as u64);
+    // *** ONE exclusion spanning JUMBF through the pixel-bitstream window. ***
+    // Collapsing into a single range avoids the
+    // `assertion.dataHash.additionalExclusionsPresent` informational log, at
+    // the cost of leaving every JPEG segment between the JUMBF and the
+    // tamper window (DQT/DHT/SOF/SOS header, plus the ENTROPY_GAP bytes)
+    // outside the hash as well.
+    let combined_start = manifest_pos;
+    let combined_end = tamper_end; // exclusive
+    let combined_len = combined_end - combined_start;
+    let combined_excl = HashRange::new(combined_start as u64, combined_len as u64);
     println!("\n=== Signing ===");
     println!(
-        "  manifest exclusion  : start={}, length={}\n  \
-         pixel    exclusion  : start={}, length={}  <-- inside JPEG scan data",
-        manifest_excl.start(),
-        manifest_excl.length(),
-        pixel_excl.start(),
-        pixel_excl.length()
+        "  single exclusion : start={}, length={} (covers JUMBF + intervening JPEG segments + {}-byte pixel window)",
+        combined_excl.start(),
+        combined_excl.length(),
+        TAMPER_LEN,
     );
-    builder.set_data_hash_exclusions(vec![manifest_excl, pixel_excl])?;
+    builder.set_data_hash_exclusions(vec![combined_excl])?;
 
     builder.update_hash_from_stream("image/jpeg", &mut output_stream)?;
 
