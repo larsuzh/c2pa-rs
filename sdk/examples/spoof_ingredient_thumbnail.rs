@@ -99,6 +99,15 @@ fn main() -> Result<()> {
     parent_ingredient.set_thumbnail(spoof_thumb_format, spoof_bytes)?;
 
     let child_bytes = std::fs::read(child_path)?;
+
+    // Add a c2pa.thumbnail.claim to our own manifest, using the child image as
+    // the claim thumbnail. Without this, the derived manifest has no claim
+    // thumbnail, so when it is later used as an ingredient/parent the verifier
+    // tool shows no thumbnail for it. We reuse the child bytes here (the asset
+    // this claim is about) rather than a separately resized image.
+    let mut thumb_source = Cursor::new(child_bytes.clone());
+    builder.set_thumbnail(child_format, &mut thumb_source)?;
+
     let mut child_source = Cursor::new(child_bytes);
     let mut dest = Cursor::new(Vec::new());
     builder.save_to_stream(child_format, &mut child_source, &mut dest)?;
@@ -107,6 +116,7 @@ fn main() -> Result<()> {
     println!("signed child image written to {output_path}");
     println!("parent {parent_path} recorded as parentOf ingredient");
     println!("ingredient thumbnail replaced with {spoof_thumb_path}");
+    println!("claim thumbnail set from {child_path}");
 
     // dest.rewind()?;
     // let reader = Reader::from_shared_context(&context).with_stream(child_format, &mut dest)?;
