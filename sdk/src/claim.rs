@@ -1291,31 +1291,32 @@ impl Claim {
         // Grab assertion data object.
         let d = assertion.decode_data();
 
-        let data_preview = match &d {
-            AssertionData::Json(s) => s.clone(),
-            AssertionData::Cbor(bytes) => {
-                let mut json_buf: Vec<u8> = Vec::new();
-                let mut de = c2pa_cbor::Deserializer::from_slice(bytes);
-                let mut ser = serde_json::Serializer::pretty(&mut json_buf);
-                if serde_transcode::transcode(&mut de, &mut ser).is_ok() {
-                    String::from_utf8_lossy(&json_buf).into_owned()
-                } else {
-                    format!("<cbor {} bytes, decode failed>", bytes.len())
-                }
-            }
-            AssertionData::Binary(bytes) => {
-                // Write binary assertions to /sdk/examples/assets so they can be inspected.
-                let safe_label = label.replace('/', "_").replace(':', "_");
-                let path = format!("/sdk/examples/assets/c2pa_assert_{safe_label}.bin");
-                let _ = std::fs::write(&path, bytes);
-                format!("<binary {} bytes — saved to {path}>", bytes.len())
-            }
-            AssertionData::Uuid(uuid, bytes) => format!("<uuid={uuid}, {} bytes>", bytes.len()),
-        };
-        println!(
-            "[calc_assertion_box_hash] label={label:?}, alg={alg:?}, salt={}, data={data_preview}",
-            salt.as_deref().map(hex::encode).unwrap_or_else(|| "none".to_string()),
-        );
+        // Uncomment this to print the actual assertion values
+        // let data_preview = match &d {
+        //     AssertionData::Json(s) => s.clone(),
+        //     AssertionData::Cbor(bytes) => {
+        //         let mut json_buf: Vec<u8> = Vec::new();
+        //         let mut de = c2pa_cbor::Deserializer::from_slice(bytes);
+        //         let mut ser = serde_json::Serializer::pretty(&mut json_buf);
+        //         if serde_transcode::transcode(&mut de, &mut ser).is_ok() {
+        //             String::from_utf8_lossy(&json_buf).into_owned()
+        //         } else {
+        //             format!("<cbor {} bytes, decode failed>", bytes.len())
+        //         }
+        //     }
+        //     AssertionData::Binary(bytes) => {
+        //         // Write binary assertions to /sdk/examples/assets so they can be inspected.
+        //         let safe_label = label.replace('/', "_").replace(':', "_");
+        //         let path = format!("sdk/examples/assets/c2pa_assert_{safe_label}.bin");
+        //         let _ = std::fs::write(&path, bytes);
+        //         format!("<binary {} bytes — saved to {path}>", bytes.len())
+        //     }
+        //     AssertionData::Uuid(uuid, bytes) => format!("<uuid={uuid}, {} bytes>", bytes.len()),
+        // };
+        // println!(
+        //     "[calc_assertion_box_hash] label={label:?}, alg={alg:?}, salt={}, data={data_preview}",
+        //     salt.as_deref().map(hex::encode).unwrap_or_else(|| "none".to_string()),
+        // );
 
         let mut hash_bytes = Vec::with_capacity(2048);
 
@@ -1860,7 +1861,111 @@ impl Claim {
         let data = self.data().ok()?;
         let mut validation_log =
             StatusTracker::with_error_behavior(ErrorBehavior::StopOnFirstError);
-
+        // Uncomment this to dump the raw COSE_Sign1 + parsed pieces for inspection.
+        //     v1 time-stamps (deprecated) are stored in a COSE unprotected header
+        //     whose label is the string sigTst. If present, the value of this header
+        //     shall be a tstContainer defined by Example 2, “CDDL for tstContainer”.
+        //     The content of the TimeStampResp structure received in reply from the
+        //     TSA shall be stored as the value of the val property of an element of tstTokens.
+        //
+        //     v2 time-stamps shall be stored in a COSE unprotected header whose label is the
+        //     string sigTst2. When present, the value of this header shall be a tstContainer
+        //     defined by Example 2, “CDDL for tstContainer”. The value of the timeStampToken
+        //     field of the TimeStampResp structure received in reply from the TSA shall be stored
+        //     as the value of the val property of an element of tstTokens. It shall be formatted as
+        //     a DER-encoded RFC 3161 TimeStampToken wrapped in a CBOR byte string.
+        // {
+        //     use coset::{CborSerializable, Label, TaggedCborSerializable};
+        //
+        //     let cose_bytes = self.signature_val();
+        //     let safe_label = self.label().replace('/', "_").replace(':', "_");
+        //     let cose_path = format!("/tmp/c2pa_cose_{safe_label}.cbor");
+        //     let _ = std::fs::write(&cose_path, cose_bytes);
+        //
+        //     // Try to parse the COSE_Sign1 so we can print its pieces.
+        //     let parsed = coset::CoseSign1::from_slice(cose_bytes)
+        //         .or_else(|_| {
+        //             // Some payloads are tagged (98(...)). Strip the tag wrapper if present.
+        //             coset::CoseSign1::from_tagged_slice(cose_bytes)
+        //         });
+        //
+        //     match parsed {
+        //         Ok(sign1) => {
+        //             // Protected header (signed: alg, x5chain, etc.)
+        //             let protected = &sign1.protected.header;
+        //             let unprotected_labels: Vec<String> = sign1
+        //                 .unprotected
+        //                 .rest
+        //                 .iter()
+        //                 .map(|(l, _)| match l {
+        //                     Label::Text(s) => s.clone(),
+        //                     Label::Int(i) => i.to_string(),
+        //                 })
+        //                 .collect();
+        //
+        //             println!(
+        //                 "[signature_info] claim={:?}",
+        //                 self.label()
+        //             );
+        //             println!(
+        //                 "  raw COSE_Sign1: {} bytes — saved to {cose_path}",
+        //                 cose_bytes.len()
+        //             );
+        //             println!(
+        //                 "  protected.alg={:?}, protected.crit={:?}, content_type={:?}",
+        //                 protected.alg, protected.crit, protected.content_type
+        //             );
+        //             println!(
+        //                 "  unprotected header labels: {unprotected_labels:?}"
+        //             );
+        //             println!(
+        //                 "  payload: {}",
+        //                 sign1
+        //                     .payload
+        //                     .as_ref()
+        //                     .map(|p| format!("{} bytes (detached payload is hashed claim CBOR)", p.len()))
+        //                     .unwrap_or_else(|| "<detached / nil>".to_string())
+        //             );
+        //             println!(
+        //                 "  signature value ({} bytes): {}",
+        //                 sign1.signature.len(),
+        //                 hex::encode(&sign1.signature)
+        //             );
+        //
+        //             // sigTst / sigTst2 — RFC 3161 timestamp token (countersignature).
+        //             for (lbl, val) in &sign1.unprotected.rest {
+        //                 if let Label::Text(name) = lbl {
+        //                     if name == "sigTst" || name == "sigTst2" {
+        //                         let tst_bytes = match val.clone().to_vec() {
+        //                             Ok(b) => b,
+        //                             Err(_) => continue,
+        //                         };
+        //                         let tst_path = format!("/tmp/c2pa_{name}_{safe_label}.cbor");
+        //                         let _ = std::fs::write(&tst_path, &tst_bytes);
+        //                         println!(
+        //                             "  TIMESTAMP FOUND: {name} = {} bytes — saved to {tst_path}",
+        //                             tst_bytes.len()
+        //                         );
+        //                         println!(
+        //                             "    inspect with: xxd {tst_path}   (CBOR-wrapped RFC 3161 TimeStampResp/Token)"
+        //                         );
+        //                     }
+        //                 }
+        //             }
+        //             if !sign1.unprotected.rest.iter().any(|(l, _)| {
+        //                 matches!(l, Label::Text(s) if s == "sigTst" || s == "sigTst2")
+        //             }) {
+        //                 println!("  NO TIMESTAMP: neither sigTst nor sigTst2 present in unprotected header");
+        //             }
+        //         }
+        //         Err(e) => {
+        //             println!(
+        //                 "[signature_info] failed to parse COSE_Sign1 ({e:?}); raw {} bytes saved to {cose_path}",
+        //                 cose_bytes.len()
+        //             );
+        //         }
+        //     }
+        // }
         if _sync {
             Some(get_signing_info(sig, &data, &mut validation_log, false))
         } else {
@@ -3162,14 +3267,15 @@ impl Claim {
         // verify assertion structure comparing hashes from assertion list to contents of assertion store
         for assertion in claim.assertions() {
             let (label, instance) = Claim::assertion_label_from_link(&assertion.url());
-            println!(
-                "[verify_internal] assertion: url={:?}, alg={:?}, hash={}, is_relative={}, data={:?}",
-                assertion.url(),
-                assertion.alg(),
-                hex::encode(assertion.hash()),
-                assertion.is_relative_url(),
-                claim.get_claim_assertion(&label, instance),
-            );
+            // Uncomment this to print the assertions in the claim together with its value
+            // println!(
+            //     "[verify_internal] assertion: url={:?}, alg={:?}, hash={}, is_relative={}, data={:?}",
+            //     assertion.url(),
+            //     assertion.alg(),
+            //     hex::encode(assertion.hash()),
+            //     assertion.is_relative_url(),
+            //     claim.get_claim_assertion(&label, instance),
+            // );
             let assertion_absolute_uri = if assertion.is_relative_url() {
                 to_absolute_uri(claim.label(), &assertion.url())
             } else {
