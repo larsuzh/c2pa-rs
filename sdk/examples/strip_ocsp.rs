@@ -18,14 +18,6 @@
 //     and re-chunks into APP11 segments.
 //   * Re-validates the output and reports the new revocation state.
 //
-// What this does NOT do:
-//   * Forge / substitute an OCSP response. An OCSP response is signed by
-//     the CA's responder, so a fake one wouldn't pass the responder-sig
-//     check inside `OcspResponse::from_der_checked`. The interesting
-//     adversarial operation is the *removal* this script performs --
-//     after which a validator must fall back to an online OCSP check
-//     (C2PA §15.9.2) or downgrade to "no revocation information".
-//
 // Usage:
 //   cargo run -p c2pa --example strip_ocsp -- <input.jpg> <output.jpg>
 
@@ -173,8 +165,17 @@ fn main() -> Result<()> {
 // -----------------------------------------------------------------------------
 
 /// Parse the COSE_Sign1, drop `ocspVals` from the `rVals` map in the
-/// unprotected header (and `rVals` itself if it ends up empty), and
-/// re-encode at exactly the original byte length.
+/// unprotected header (and `rVals` itself if it ends up empty), then
+/// serialise the modified structure back to CBOR.
+///
+/// This means turning the in-memory `CoseSign1` back into its
+/// CBOR byte representation. Removing the staple makes that encoding shorter
+/// than the original, but the manifest occupies a fixed byte range inside
+/// the JUMBF -- and is excluded from the `c2pa.hash.data` hard binding by
+/// that range -- so shrinking it would shift every following byte and break
+/// the surrounding offsets. To avoid that, the freed space is reclaimed by a
+/// `pad` byte-string in the unprotected header, sized so the re-encoded
+/// COSE_Sign1 lands at exactly the original byte length.
 fn rewrite_cose_sign1(cose_bytes: &[u8]) -> Result<Vec<u8>> {
     let target_size = cose_bytes.len();
     let tagged = !cose_bytes.is_empty() && cose_bytes[0] == 0xD2;

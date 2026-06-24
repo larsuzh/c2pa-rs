@@ -1,4 +1,5 @@
-// Graft a stapled OCSP response from one C2PA-signed JPEG into another.
+// Graft a stapled OCSP response from one C2PA-signed JPEG into another
+// signed with the SAME certificate
 //
 // What this is for
 // ----------------
@@ -10,61 +11,35 @@
 // invalidating the underlying COSE_Sign1. This PoC takes the OCSP blob
 // out of one signed asset and patches it into another.
 //
-// Two attacker variants the graft demonstrates
-// --------------------------------------------
-// Variant 1 -- "stale-good replay" (same signing cert).
-//   Cert X was good on Monday (stapled), revoked Tuesday. On Wednesday
-//   the attacker still holds X's private key and signs a new manifest
-//   with a fresh, real RFC 3161 timestamp. Wednesday lies inside the
-//   Monday staple's [thisUpdate, nextUpdate] window, so when the
-//   attacker grafts Monday's staple onto Wednesday's manifest, the
-//   verifier sees certStatus=good + timestamp in window and emits
-//   `signingCredential.ocsp.notRevoked`. This is the inherent freshness
-//   gap of OCSP stapling (the staple proves status at thisUpdate, not at
-//   signing time) -- the only mitigation §15.9.1 offers is the optional
-//   online check in §15.9.2.
+// An OCSP response only attests to a certificate's status as of its
+// `thisUpdate` time, across a `[thisUpdate, nextUpdate]` validity window.
+// A `good` response collected while the cert was still valid keeps reading
+// `good` until that window closes. So consider a cert that was good on
+// Monday (stapled into some asset) and revoked on Tuesday. As long as
+// Monday's window has not yet expired, the holder of any asset signed by
+// that same cert can graft Monday's still-"good" staple onto it and have a
+// verifier emit `signingCredential.ocsp.notRevoked`, even though the cert
+// is now revoked. Because source and target share the signing certificate,
+// the grafted response attests to exactly that certificate and is accepted
+// as applying to the target's signature. The staple proves status at `thisUpdate`,
+// not at signing or validation time. The only mitigation §15.9.1 offers is the
+// optional online check in §15.9.2.
 //
-// Variant 2 -- "cross-cert graft" (different signing cert, c2pa-rs-specific).
-//   The attacker signs with a completely different cert -- possibly from a
-//   different CA, possibly revoked -- and grafts in a staple harvested
-//   from any other signed asset. Provided the grafted response's
-//   embedded OCSP-responder cert chains to *any* trust anchor the
-//   verifier accepts, and the timestamp falls inside its window, the
-//   verifier still emits `notRevoked`. The staple is about a different
-//   certificate entirely, but the c2pa-rs verifier never checks that.
-//
-// Is the missing CertID match a spec issue or an implementation issue?
-// --------------------------------------------------------------------
-// Implementation issue. The C2PA spec at §15.9.1 says:
-//   "A validator shall decode OCSP responses per the requirements of
-//    RFC 6960, in particular requirements 1 through 4 of section 3.2."
-// RFC 6960 §3.2 requirement 1 is:
-//   "The certificate identified in a received response corresponds to
-//    the certificate that was identified in the corresponding request"
-// and requirement 4 is:
-//   "The signer is currently authorized to provide a response for the
-//    certificate in question."
-// Both are predicates about a specific certificate; you cannot satisfy
-// them without comparing the staple's CertID (serial + issuer_name_hash
-// + issuer_key_hash) to the signing certificate. §15.9.1 also speaks of
-// "the relevant certificate" -- the relevance has to come from somewhere,
-// and the only candidate is a CertID match.
-//
-// The c2pa-rs verifier currently performs:
-//   * OCSP signature check (responder cert + EKU + chain),
-//   * certStatus + thisUpdate/nextUpdate vs. attested time,
-// but does *not* compare `single_response.cert_id` to the signing cert
-// in `sign1.protected.header.x5chain`. The serial number is even
-// extracted in `OcspResponse::from_der_checked` but only stored as a
-// String for log messages. A short patch -- compare CertID hashes and
-// serial against the signing cert before accepting the staple -- closes
-// Variant 2 without any spec change.
+// Out of scope: cross-certificate grafting
+// ----------------------------------------
+// A staple could also be grafted across *different* certificates if a
+// verifier failed to check that the response's CertID matches the signing
+// certificate. That is an implementation concern (a missing CertID check),
+// not a weakness of the C2PA specification -- §15.9.1 already requires
+// validators to follow RFC 6960 §3.2, which mandates that the response
+// correspond to the certificate in question. We therefore leave it out of
+// scope and demonstrate only the spec-level freshness gap above.
 //
 // What this script does
 // ---------------------
 //   * Reassembles the JUMBF from the source JPEG, finds its COSE_Sign1,
 //     pulls the first DER blob out of `rVals.ocspVals` and reports its
-//     CertID(s) so you can see which cert it's actually attesting to.
+//     produced-at time, status, and validity window.
 //   * Does the same for the target JPEG, reporting what (if anything)
 //     it already has stapled and the size budget in the COSE_Sign1
 //     reservation.
@@ -80,9 +55,10 @@
 //   cargo run -p c2pa --example graft_ocsp_staple -- \
 //        <source.jpg> <target.jpg> <output.jpg>
 //
-// where <source.jpg> already has a stapled OCSP (use
-// `analyze_ocsp_stapling` to find one) and <target.jpg> is any signed
-// JPEG with enough pad room in its COSE_Sign1 to absorb the graft.
+// where <source.jpg> and <target.jpg> are signed with the same certificate
+// (use `analyze_ocsp_stapling` to find a source carrying a stapled OCSP)
+// and <target.jpg> has enough pad room in its COSE_Sign1 to absorb the
+// graft.
 
 use std::io::Cursor;
 
@@ -132,7 +108,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("extracting OCSP staple from {source_path}"))?;
     println!("=== source ({source_path}) ===");
     println!("  stapled OCSP DER: {} bytes", source_ocsp_der.len());
-    summarize_ocsp_certids("    ", &source_ocsp_der)?;
+    summarize_ocsp("    ", &source_ocsp_der)?;
 
     // 2) Read + validate the target so we can report before/after.
     let target_bytes = std::fs::read(target_path)
@@ -163,9 +139,9 @@ fn main() -> Result<()> {
     let (cose_start, cose_end) = find_cose_sign1_range(&target_jumbf)?;
     let target_cose = &target_jumbf[cose_start..cose_end];
     println!("  COSE_Sign1 reservation: {} bytes", target_cose.len());
-    if let Some(existing) = extract_first_stapled_ocsp(&target_bytes).ok() {
+    if let Ok(existing) = extract_first_stapled_ocsp(&target_bytes) {
         println!("  target already has a {}-byte stapled OCSP -- will be replaced.", existing.len());
-        summarize_ocsp_certids("    (existing) ", &existing)?;
+        summarize_ocsp("    (existing) ", &existing)?;
     } else {
         println!("  target has no stapled OCSP -- a fresh rVals.ocspVals will be added.");
     }
@@ -226,7 +202,7 @@ fn main() -> Result<()> {
 }
 
 // -----------------------------------------------------------------------------
-// OCSP extraction and CertID reporting
+// OCSP extraction and reporting
 // -----------------------------------------------------------------------------
 
 /// Reassemble the JUMBF from the JPEG, locate the COSE_Sign1, find
@@ -271,10 +247,10 @@ fn extract_first_stapled_ocsp(jpeg_bytes: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-/// Print the CertID(s) that the OCSP response is attesting to, so the
-/// reader can see directly that the staple is bound to a specific
-/// certificate and not to the asset.
-fn summarize_ocsp_certids(indent: &str, der: &[u8]) -> Result<()> {
+/// Print the produced-at time, status, and validity window of an OCSP
+/// response, so the reader can see the `[thisUpdate, nextUpdate]` window
+/// that the stale-good replay relies on.
+fn summarize_ocsp(indent: &str, der: &[u8]) -> Result<()> {
     let resp: rasn_ocsp::OcspResponse =
         rasn::der::decode(der).map_err(|e| anyhow!("decoding OcspResponse: {e}"))?;
     if resp.status != OcspResponseStatus::Successful {
@@ -289,16 +265,16 @@ fn summarize_ocsp_certids(indent: &str, der: &[u8]) -> Result<()> {
         .map_err(|e| anyhow!("decoding BasicOcspResponse: {e}"))?;
     println!("{indent}producedAt: {}", basic.tbs_response_data.produced_at);
     for (i, sr) in basic.tbs_response_data.responses.iter().enumerate() {
-        println!(
-            "{indent}certId[{i}] serial = {}  hashAlg = {}",
-            sr.cert_id.serial_number, sr.cert_id.hash_algorithm.algorithm
-        );
-        match &sr.cert_status {
-            rasn_ocsp::CertStatus::Good => println!("{indent}            status = good"),
-            rasn_ocsp::CertStatus::Revoked(_) => {
-                println!("{indent}            status = REVOKED")
-            }
-            rasn_ocsp::CertStatus::Unknown(_) => println!("{indent}            status = unknown"),
+        let status = match &sr.cert_status {
+            rasn_ocsp::CertStatus::Good => "good",
+            rasn_ocsp::CertStatus::Revoked(_) => "REVOKED",
+            rasn_ocsp::CertStatus::Unknown(_) => "unknown",
+        };
+        println!("{indent}response[{i}] status = {status}");
+        println!("{indent}            thisUpdate = {}", sr.this_update);
+        match &sr.next_update {
+            Some(nu) => println!("{indent}            nextUpdate = {nu}"),
+            None => println!("{indent}            nextUpdate = (absent)"),
         }
     }
     Ok(())
