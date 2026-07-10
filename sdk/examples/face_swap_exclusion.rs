@@ -1,39 +1,12 @@
 // Content-swap DataHash exclusion proof-of-concept ("face swap").
 //
 // This is a *meaningful* variant of `pixel_tamper_exclusion`.  Instead of
-// zeroing a random window of the scan data, it takes two photographs of the
-// same scene -- one with a man in it (the "cover"), one with a woman (the
+// zeroing a random window of the scan data, it takes two photographs of a
+// similar scene -- one with a man in it (the "cover"), one with a woman (the
 // "insert") -- signs the man's photo while declaring a DataHash exclusion over
 // the compressed pixel data, and then splices the woman's pixels into the
 // signed file.  The result still validates as a genuine, untampered C2PA
 // asset, yet the person in the picture has been swapped out entirely.
-//
-// Why a whole-image swap and not just the face?  A JPEG entropy-coded scan is
-// a single continuous bitstream with DC prediction carried across blocks, so
-// a spatial region (a face) does not map to a contiguous, independently
-// decodable byte range.  Swapping the *entire* scan does, and it only works
-// cleanly because the two source images were encoded with byte-for-byte
-// identical JPEG headers -- same APPn/DQT/SOF/DHT/SOS -- so the woman's scan
-// decodes correctly against the man's tables.  The script enforces that
-// precondition.
-//
-// The length trick
-// ----------------
-// A DataHash exclusion hides the swap only if every byte *outside* the
-// excluded range is unchanged, which means the tampered scan must be exactly
-// the same byte length as the cover's scan.  This script therefore fits the
-// insert's scan into the cover's byte budget: it truncates (if longer) or
-// zero-pads (if shorter) the insert scan and forces a trailing FFD9 EOI so the
-// last two bytes -- the only image bytes left inside the hash -- match.
-// Truncating a JPEG scan just drops the bottom-most rows (a thin strip renders
-// gray); everything above decodes normally.
-//
-// Because there is exactly ONE exclusion entry, the validator does not emit the
-// `assertion.dataHash.additionalExclusionsPresent` informational log -- the
-// exclusion list looks "clean" to anything that only counts ranges.  The cost
-// of that silence is that the single range spans the JUMBF, every JPEG header
-// segment, and the entire pixel bitstream, leaving only the SOI/EOI markers
-// actually protected by the hash.
 //
 // Usage:
 //   cargo run --release -p c2pa --example face_swap_exclusion -- \
@@ -44,9 +17,6 @@
 //       sdk/examples/assets/eiffeltower_male.jpg \
 //       sdk/examples/assets/eiffeltower_female.jpg \
 //       /tmp/signed_man.jpg /tmp/tampered_woman.jpg
-//
-// Open both output files in an image viewer: the signed file shows the man,
-// the tampered file shows the woman, and both pass C2PA validation.
 
 use std::io::{Cursor, Seek, Write};
 

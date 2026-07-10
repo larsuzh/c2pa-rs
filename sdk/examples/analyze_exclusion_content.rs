@@ -2,13 +2,6 @@
 // assertion, and report -- for every exclusion range -- *what bytes the
 // signer chose to leave out of the data hash*.
 //
-// Why this is interesting: a DataHash exclusion is, by definition, a hole in
-// the asset's integrity guarantee.  A spec-compliant signer should only
-// exclude the JUMBF box itself (because the hash is computed before that box
-// is sealed).  Any *other* exclusion -- EXIF, XMP, ICC, a JPEG comment, a
-// slice of the entropy-coded scan data -- means the signer has chosen not
-// to protect those bytes.  This script makes those choices visible.
-//
 // For each exclusion we:
 //   * walk the JPEG marker structure to figure out which segments the byte
 //     range overlaps;

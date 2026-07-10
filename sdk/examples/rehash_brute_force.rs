@@ -7,12 +7,6 @@
 //   of its JUMBF super-box payload is still present in the parent
 //   manifest (now preserved as an ingredient in the redacted file).
 //
-//   Given:
-//     * the stored hash (pulled straight out of the parent claim's
-//       hashed_uri reference),
-//     * the known JSON shape,
-//   the attacker brute-forces the hidden field values.
-//
 // Assumed JSON shape (must match byte-for-byte including key order):
 //   {"@context":"http://schema.org/","@type":"CreativeWork",
 //    "author":[{"@type":"Person","name":"<X>"}],

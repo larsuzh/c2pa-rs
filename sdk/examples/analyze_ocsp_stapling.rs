@@ -1,16 +1,7 @@
 // Walk every JPEG under `sdk/examples/assets`, reach into the COSE_Sign1's
 // unprotected header, and report what (if anything) the signer "stapled" in
 // the `rVals` map -- i.e. the OCSP responses that the C2PA spec allows a
-// claim generator to embed so a validator can decide revocation without an
-// online round-trip.
-//
-// Spec reference (C2PA 2.x, §15.9.1):
-//   "If the claim generator 'stapled' OCSP responses in the rVals header of
-//    the COSE_Sign1 structure, the validator shall decode and validate the
-//    stapled OCSP responses ..."
-//
-// `rVals` lives in the COSE_Sign1 *unprotected* header as a CBOR map whose
-// `ocspVals` entry is an array of DER-encoded OCSPResponse blobs.
+// claim generator to embed.
 //
 // For each signed asset we:
 //   * reassemble the JUMBF from the JPEG APP11 segments,

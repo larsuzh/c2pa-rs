@@ -3,9 +3,7 @@
 // The COSE_Sign1 in a C2PA manifest carries stapled revocation data as an
 // `rVals` entry in its *unprotected* header (RFC 9360 / C2PA §15.9.1). The
 // useful contents are an `ocspVals` array of DER-encoded OCSPResponse
-// blobs. Unprotected headers are not covered by the COSE signature, so any
-// holder of the signed asset can delete the staple without invalidating
-// the underlying COSE signature.
+// blobs.
 //
 // What this script does:
 //   * Verifies the input parses, has a stapled OCSP response in `rVals`.
@@ -167,15 +165,6 @@ fn main() -> Result<()> {
 /// Parse the COSE_Sign1, drop `ocspVals` from the `rVals` map in the
 /// unprotected header (and `rVals` itself if it ends up empty), then
 /// serialise the modified structure back to CBOR.
-///
-/// This means turning the in-memory `CoseSign1` back into its
-/// CBOR byte representation. Removing the staple makes that encoding shorter
-/// than the original, but the manifest occupies a fixed byte range inside
-/// the JUMBF -- and is excluded from the `c2pa.hash.data` hard binding by
-/// that range -- so shrinking it would shift every following byte and break
-/// the surrounding offsets. To avoid that, the freed space is reclaimed by a
-/// `pad` byte-string in the unprotected header, sized so the re-encoded
-/// COSE_Sign1 lands at exactly the original byte length.
 fn rewrite_cose_sign1(cose_bytes: &[u8]) -> Result<Vec<u8>> {
     let target_size = cose_bytes.len();
     let tagged = !cose_bytes.is_empty() && cose_bytes[0] == 0xD2;

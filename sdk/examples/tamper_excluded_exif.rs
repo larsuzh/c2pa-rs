@@ -1,6 +1,5 @@
 // Verify that the EXIF metadata inside a DataHash exclusion really is
-// unprotected -- by rewriting the camera/author fields the verifier proudly
-// displays, without invalidating the C2PA signature.
+// unprotected by rewriting the camera/author fields
 //
 // Hard-coded for the finding `analyze_exclusion_content` reports for
 // `attack_assets/horshack.jpg`:
@@ -27,10 +26,7 @@
 // -- is attacker-controllable.  This example flips three of those strings to
 // false values *in place*.  Each replacement is exactly the same byte length
 // as the original (the trailing EXIF NUL terminator is preserved), so no IFD
-// offset or segment length has to be recomputed -- it's a true byte-for-byte
-// swap inside the excluded range.  After tampering, `c2pa::Reader` still
-// reports the same validation state: the hard binding never covered these
-// bytes.
+// offset or segment length has to be recomputed
 //
 // Steps:
 //   1. Read the source file.

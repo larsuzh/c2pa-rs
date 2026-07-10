@@ -11,15 +11,6 @@
 // the un-protection visible: the JPEG still decodes (with corruption where
 // those bytes were), and C2PA validation still returns Valid.
 //
-// Because there is exactly one exclusion entry, the validator does NOT emit
-// the `assertion.dataHash.additionalExclusionsPresent` informational log --
-// the exclusion list looks "clean" to anything that only counts ranges.
-// The cost of that silence is that the single exclusion also covers every
-// JPEG segment between the JUMBF and the pixel window (typically JFIF,
-// EXIF, XMP, ICC, DQT, DHT, SOF, SOS header) plus the ENTROPY_GAP "safety"
-// bytes at the start of the scan -- all of which are now outside the hash
-// and free for an attacker to mutate.
-//
 // Usage:
 //   cargo run --release -p c2pa --example pixel_tamper_exclusion -- \
 //       <input.jpg> <output_signed.jpg> <output_tampered.jpg>

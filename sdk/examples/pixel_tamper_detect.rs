@@ -1,15 +1,9 @@
 // Pixel-tamper detection check (the honest counterpart to
 // `pixel_tamper_exclusion`).
 //
-// This script takes an *already C2PA-signed* JPEG, overwrites a window of its
+// This script takes a *C2PA-signed* JPEG, overwrites a window of its
 // entropy-coded scan data (the compressed pixel bitstream), and then runs the
 // validator to confirm that the tampering is detected.
-//
-// Unlike `pixel_tamper_exclusion`, nothing is signed here: we never touch the
-// manifest, never declare any DataHash exclusions, and never re-hash.  The
-// input is assumed to have been signed normally, so its DataHash covers the
-// pixel bytes we corrupt.  The expected result is therefore an INVALID
-// validation state with an `assertion.dataHash.mismatch` failure.
 //
 // Usage:
 //   cargo run --release -p c2pa --example pixel_tamper_detect -- \
